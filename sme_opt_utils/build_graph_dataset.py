@@ -1,9 +1,9 @@
 from build_data import built_mol_graph_data_and_save
 import argparse
 
-task_list = ['ESOL', 'Mutagenicity', 'hERG', 'BBBP']
+task_list = ['ESOL', 'Mutagenicity', 'hERG', 'BBBP', "qy", "peakwavs", "extinc_coeff"]        # added 3 more tasks
 for task in task_list:
-    input_csv = '../data/origin_data/' + task + '.csv'
+    input_csv = '../data/origin_data/' + task + '.csv'      # path to the original data csv inside origin data
     output_g_path = '../data/graph_data/' + task + '.bin'
     output_g_group_path = '../data/graph_data/' + task + '_group.csv'
 

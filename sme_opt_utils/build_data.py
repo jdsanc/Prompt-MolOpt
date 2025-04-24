@@ -809,6 +809,17 @@ def built_mol_graph_data_and_save(
         save_g_group_for_fg_path='No_name_mol_graph_group_for_fg.csv'
 
 ):
+    # Ensuring all the output directories exist
+    for out_path in [
+        save_g_group_path, save_g_path, 
+        save_g_group_for_brics_path, save_g_for_brics_path,
+        save_g_group_for_murcko_path, save_g_for_murcko_path, 
+        save_g_group_for_fg_path, save_g_for_fg_path
+    ]:
+        dir_name = os.path.dirname(out_path)
+        if dir_name and not os.path.exists(dir_name):
+            os.makedirs(dir_name, exist_ok=True)
+
     data_origin = pd.read_csv(origin_data_path, index_col=None)
     smiles_name = 'smiles'
 
