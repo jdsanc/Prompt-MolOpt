@@ -26,7 +26,7 @@ def return_atom_num(smi):
     except:
         return 10000
 
-
+""""
 # fix parameters of model
 def SME_opt_sub_detect(smiles, model_name, rgcn_hidden_feats=[64, 64, 64], ffn_hidden_feats=128,
                                   lr=0.0003, classification=False, mode='higher'):
@@ -134,6 +134,170 @@ def SME_opt_sub_detect(smiles, model_name, rgcn_hidden_feats=[64, 64, 64], ffn_h
     except:
         print('{} mol detect failed.'.format(smiles))
         return -1, -1, -1, -1, -1, -1
+    
+"""
+def SME_opt_sub_detect(smiles, model_name, rgcn_hidden_feats=[64, 64, 64], ffn_hidden_feats=128,
+                                  lr=0.0003, classification=False, mode='higher'):
+    try:
+        print(f"Processing molecule: {smiles}")
+        
+        # Commenter le cas particulier pour 'OC=O' et le contourner
+        # if smiles == 'OC=O':  # Cas particulier pour les molécules simples
+        #     print(f"Special case for molecule: {smiles}")
+        #     return 0, smiles, 1, [], 0.0, 0
+
+        args = {}
+        args['device'] = "cpu"
+        args['node_data_field'] = 'node'
+        args['edge_data_field'] = 'edge'
+        args['substructure_mask'] = 'smask'
+        # Model parameters
+        args['num_epochs'] = 500
+        args['patience'] = 30
+        args['batch_size'] = 8
+        args['mode'] = 'higher'
+        args['in_feats'] = 40
+        args['classification'] = classification
+        args['rgcn_hidden_feats'] = rgcn_hidden_feats
+        args['ffn_hidden_feats'] = ffn_hidden_feats
+        args['rgcn_drop_out'] = 0
+        args['ffn_drop_out'] = 0
+        args['lr'] = lr
+        args['loop'] = True
+        args['task_name'] = model_name  # Change the task name
+        
+        #print("Building molecular graph...")
+        rgcn_bg, sub_smi_list, smask_idx_list = build_mol_graph_for_one_mol(smiles)
+        
+        # Vérification de la validité de rgcn_bg et des indices
+        if rgcn_bg is None:
+            print(f"Error: Failed to build molecular graph for {smiles}")
+            return -1, -1, -1, -1, -1, -1
+        
+        if not smask_idx_list:
+            print(f"Error: No substructure mask indices found for {smiles}")
+            return -1, -1, -1, -1, -1, -1
+        
+        #print(f"Substructure mask indices for {smiles}: {smask_idx_list}")
+
+        sme_opt_detect = pd.DataFrame()
+        sme_opt_detect['smiles'] = sub_smi_list
+        sme_opt_detect['smask_idx'] = smask_idx_list
+
+        for seed in range(10):
+            #print(f"Training model with seed {seed + 1}...")
+            rgcn_bg_i = rgcn_bg.to(args['device'])
+            model = RGCN(ffn_hidden_feats=args['ffn_hidden_feats'],
+                         ffn_dropout=args['ffn_drop_out'],
+                         rgcn_node_feats=args['in_feats'], rgcn_hidden_feats=args['rgcn_hidden_feats'],
+                         rgcn_drop_out=args['rgcn_drop_out'],
+                         classification=args['classification'])
+            stopper = EarlyStopping(patience=args['patience'], task_name=args['task_name'] + '_' + str(seed + 1),
+                                    mode=args['mode'])
+            model.to(args['device'])
+            stopper.load_checkpoint(model)
+            model.eval()
+            eval_meter = Meter()
+            
+            with th.no_grad():
+                rgcn_node_feats = rgcn_bg_i.ndata.pop(args['node_data_field']).float().to(args['device'])
+                rgcn_edge_feats = rgcn_bg_i.edata.pop(args['edge_data_field']).long().to(args['device'])
+                smask_feats = rgcn_bg_i.ndata.pop(args['substructure_mask']).unsqueeze(dim=1).float().to(args['device'])
+                #print(f"Model forward pass for seed {seed + 1}...")
+                
+                preds, weight = model(rgcn_bg_i, rgcn_node_feats, rgcn_edge_feats, smask_feats)
+                eval_meter.update(preds, preds)
+                th.cuda.empty_cache()
+            
+            y_true, y_pred = eval_meter.compute_metric('return_pred_true')
+            #print(f"Predictions for seed {seed + 1}: {y_pred[:5]}")  # Imprime les 5 premières prédictions
+            
+            if args['classification']:
+                y_pred = th.sigmoid(y_pred)
+                y_pred = y_pred.squeeze().numpy().tolist()
+            else:
+                y_pred = y_pred.squeeze().numpy().tolist()
+                
+            if type(y_pred).__name__ != 'list':
+                y_pred = [y_pred]
+                
+            attri_pred = cal_attri(y_pred)
+            sme_opt_detect['attri_{}'.format(seed + 1)] = attri_pred
+
+        # Calcul des moyennes et écarts-types
+        attri_mean = sme_opt_detect[['attri_{}'.format(i + 1) for i in range(10)]].mean(axis=1)
+        attri_std = sme_opt_detect[['attri_{}'.format(i + 1) for i in range(10)]].std(axis=1)
+        sme_opt_detect['attri_mean'] = attri_mean
+        sme_opt_detect['attri_std'] = attri_std
+
+        # Vérification de la forme du DataFrame
+        #print(f"Sme_opt_detect DataFrame shape: {sme_opt_detect.shape}")
+        
+        sme_opt_detect_mol = sme_opt_detect[:1]
+        pred_value = sme_opt_detect_mol.attri_mean.tolist()[0]
+        sme_opt_detect_sub = sme_opt_detect[1:]
+
+        # Filtrage des sous-structures selon certains critères
+        new_sme_opt_detect_sub = sme_opt_detect_sub[
+            abs(sme_opt_detect_sub['attri_mean']) > abs(sme_opt_detect_sub['attri_std'])]
+        
+        if len(new_sme_opt_detect_sub) > 0:
+            sme_opt_detect_sub = new_sme_opt_detect_sub
+        
+        sme_opt_detect = pd.concat([sme_opt_detect_mol, sme_opt_detect_sub], axis=0)
+        sub_smi_list = sme_opt_detect['smiles'].tolist()
+        attri_mean = sme_opt_detect['attri_mean'].tolist()
+
+        # Calcul des contributions atomiques
+        smi_wt_star = [sub_smi.replace("(*)", "") for sub_smi in sub_smi_list]
+        smi_wt_star = [sub_smi.replace("*", "") for sub_smi in smi_wt_star]
+        
+        # Vérification de la validité des SMILES
+        #print(f"Processing SMILES: {smi_wt_star[:5]}")  # Affiche les 5 premières molécules après nettoyage
+
+        smi_he_atom_num = [return_atom_num(smi) for smi in smi_wt_star]
+        atom_num = return_atom_num(smiles)
+        change_atom_rate = [sub_smi_he_atom_num / atom_num for sub_smi_he_atom_num in smi_he_atom_num]
+        
+        sme_opt_detect['change_atom_rate'] = change_atom_rate
+        attri_per_he_atom = [attri_mean[i] / smi_atom_num for i, smi_atom_num in enumerate(smi_he_atom_num)]
+        connect_num = [sub_smi.count('*') for sub_smi in sub_smi_list]
+        
+        sme_opt_detect['attri_per_atom'] = attri_per_he_atom
+        sme_opt_detect['sub_atom_num'] = smi_he_atom_num
+        sme_opt_detect['connect_num'] = connect_num
+
+        sme_opt_detect = sme_opt_detect[sme_opt_detect['connect_num'] <= 2]
+        sme_opt_detect = sme_opt_detect[sme_opt_detect['change_atom_rate'] <= 0.35]
+        sme_opt_detect.drop_duplicates(subset=['smiles', 'attri_mean'], inplace=True, keep='first')
+        sme_opt_detect = sme_opt_detect[sme_opt_detect['smiles'] != 'NaN']
+
+        sme_opt_detect.to_csv('mol_opt_detect_cache.csv')
+        sub_sme_opt_detect = sme_opt_detect
+        # Vérification du mode de tri
+        if mode == 'higher':
+            sub_sme_opt_detect.sort_values(by=['attri_per_atom'], ascending=True, inplace=True)
+        elif mode == 'lower':
+            sub_sme_opt_detect.sort_values(by=['attri_per_atom'], ascending=False, inplace=True)
+        
+        sub_smi_to_change = sub_sme_opt_detect.smiles.tolist()[0]
+        sub_smi_smask_idx = sub_sme_opt_detect.smask_idx.tolist()[0]
+        sub_atom_num = sub_sme_opt_detect.sub_atom_num.tolist()[0]
+        sub_smi_to_change_value = sub_sme_opt_detect.attri_per_atom.tolist()[0]
+        sub_connect_num = sub_smi_to_change.count("*")
+
+        #print(f"Final selected substructure: {sub_smi_to_change}")
+        
+        if sub_connect_num == 0:
+            print(f"No valid substructure to change for {smiles}")
+            return -1, -1, -1, -1, -1, -1
+        else:
+            return pred_value, sub_smi_to_change, sub_atom_num, sub_smi_smask_idx, sub_smi_to_change_value, sub_connect_num
+
+    except Exception as e:
+        print(f'{smiles} mol detect failed: {e}')
+        return -1, -1, -1, -1, -1, -1
+    
 
 
 # 返回所有键的index
